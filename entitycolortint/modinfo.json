@@ -1,0 +1,10 @@
+{
+    "type": "code",
+    "modid": "entitycolortint",
+    "name": "Entity Color Tint",
+    "description": "Individual, genetic, entity colors without variants or new textures!",
+    "authors": [ "Pure Winter" ],
+    "side": "Universal",
+    "version": "2.1.3",
+    "dependencies": { "game": "1.21.5" }
+}
