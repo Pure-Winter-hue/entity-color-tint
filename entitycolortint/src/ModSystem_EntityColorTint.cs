@@ -11,6 +11,8 @@ namespace EntityColorTint
 {
 public class ModSystem_EntityColorTint : ModSystem
     {
+        private const string ConfigFileName = "entitycolortint.json";
+
         private const string AttrRoot = "entityTintV2";
         private const string AttrHas = AttrRoot + ".has";
         private const string AttrStyle = AttrRoot + ".style";
@@ -46,10 +48,11 @@ public class ModSystem_EntityColorTint : ModSystem
             this.api = api;
             base.Start(api);
 
-            // Load config on BOTH server and client. (Previously it only loaded on the server, so client-side settings never applied.)
-            try { cfg = api.LoadModConfig<Config>("entitycolortint.json") ?? Config.Default(); }
-            catch (Exception ex) { api.Logger.Error("[EntityColorTint] Failed to load entitycolortint.json, using defaults. {0}", ex); cfg = Config.Default(); }
-            try { api.StoreModConfig(cfg, "entitycolortint.json"); } catch { }
+            // Config handling (VS 1.21.x):
+            // - Singleplayer starts BOTH a client and an integrated server.
+            // - If we write the config unconditionally on both sides, whichever side starts last can overwrite user edits.
+            // - If loading fails (JSON error), we should not nuke the user's file by immediately writing defaults.
+            LoadOrCreateConfig();
 
 if (api.Side.IsServer())
             {
@@ -68,6 +71,89 @@ sapi.Event.OnEntitySpawn += OnSpawn_ServerAssign_Safe;
                 capi.Event.LevelFinalize += OnLevelFinalize_Apply_Safe;
                 clientTick = capi.Event.RegisterGameTickListener(Client_Reapply_Safe, 500);
             }
+        }
+
+        private void LoadOrCreateConfig()
+        {
+            bool shouldWrite = false;
+
+            try
+            {
+                var loaded = api.LoadModConfig<Config>(ConfigFileName);
+                if (loaded == null)
+                {
+                    cfg = Config.Default();
+                    shouldWrite = true; // first-run: create file so users have something to edit
+                }
+                else
+                {
+                    cfg = loaded;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Keep defaults in-memory, but DO NOT overwrite the existing file.
+                // This is the primary cause of "config resets every launch" reports.
+                api.Logger.Error("[EntityColorTint] Failed to load {0}. Using defaults for this session only. Fix the JSON and restart. {1}", ConfigFileName, ex);
+                cfg = Config.Default();
+                shouldWrite = false;
+            }
+
+            // Fill in null/missing sections so gameplay never NREs, and (optionally) migrate the file forward.
+            bool normalized = NormalizeConfig(cfg);
+
+            // Write only when missing, or when we actually normalized/migrated.
+            // Writing is safe, but doing it every start makes debugging harder and can clobber bad edits.
+            if (shouldWrite || normalized)
+            {
+                try { api.StoreModConfig(cfg, ConfigFileName); }
+                catch (Exception ex) { api.Logger.Warning("[EntityColorTint] Could not write {0}: {1}", ConfigFileName, ex); }
+            }
+        }
+
+        private static bool NormalizeConfig(Config c)
+        {
+            if (c == null) return false;
+
+            bool changed = false;
+            var d = Config.Default();
+
+            if (c.Gray == null) { c.Gray = d.Gray; changed = true; }
+            if (c.Dark == null) { c.Dark = d.Dark; changed = true; }
+            if (c.White == null) { c.White = d.White; changed = true; }
+            if (c.SoftHue == null) { c.SoftHue = d.SoftHue; changed = true; }
+
+            if (c.Rules == null) { c.Rules = new List<Rule>(); changed = true; }
+
+            if (c.MutationWeights == null || c.MutationWeights.Length == 0)
+            {
+                c.MutationWeights = d.MutationWeights;
+                changed = true;
+            }
+            else if (c.MutationWeights.Length != d.MutationWeights.Length)
+            {
+                // Keep whatever the user provided, but pad/trim to expected length to avoid index issues.
+                var arr = new double[d.MutationWeights.Length];
+                for (int i = 0; i < arr.Length; i++) arr[i] = i < c.MutationWeights.Length ? c.MutationWeights[i] : 0;
+                c.MutationWeights = arr;
+                changed = true;
+            }
+
+            // If all weights are zero/NaN, restore defaults so PickMutation works.
+            double sum = 0;
+            for (int i = 0; i < c.MutationWeights.Length; i++)
+            {
+                double w = c.MutationWeights[i];
+                if (double.IsNaN(w) || double.IsInfinity(w) || w < 0) { c.MutationWeights[i] = 0; changed = true; w = 0; }
+                sum += w;
+            }
+            if (sum <= 0)
+            {
+                c.MutationWeights = d.MutationWeights;
+                changed = true;
+            }
+
+            return changed;
         }
 
         public override void Dispose()
